@@ -1,0 +1,50 @@
+---
+dp180_master: {
+        S1/imu:                 imu,
+        # S1/imu_list:            imulist,
+        # S1/vio_state:           viostate,
+        # S1/vio_odom_ned:        odometry3d,
+        S1/vio_odom:            odometry3d,
+        S1/stereo1_l:           image,
+        S1/stereo2_r:           image,
+        S1/camd:                image,
+        # S1/cama:                image, # Doesnt work when sync with others -- to resolve
+        # S1/stereo1_l/hfflow:    hfopticalflow,
+        # S1/stereo2_r/hfflow:    hfopticalflow,
+        # S1/camd/hfflow:         hfopticalflow,
+        # S1/cama/hfflow:         hfopticalflow,
+        # S1/stereo1_l/disparity: disparity,
+        # S1/stereo2_r/disparity: disparity,
+        }
+
+# dp180_master: { 
+#         S1/vio_state:           vio,
+#         S1/vio_odom_ned:        vio,
+#         S1/vio_odom:            vio,
+#         # S1/imu_list:            imu,
+#         S1/imu:                 imu,
+#         S1/stereo1_l:           image,
+#         # S1/stereo1_l/hfflow:    image,
+#         # S1/stereo1_l/disparity: image,
+#         S1/stereo2_r:           image,
+#         # S1/stereo2_r/hfflow:    image,
+#         # S1/stereo2_r/disparity: image,
+#         # S1/camd/hfflow:         image,
+#         S1/camd:                image,
+#         }
+
+dp180_slave: { 
+        S0/vio_state:           vio,
+        S0/vio_odom_ned:        vio,
+        S0/vio_odom:            vio,
+        # S0/imu_list:            imu,
+        S0/imu:                 imu,
+        S0/stereo1_l:           image,
+        # S0/stereo1_l/hfflow:    image,
+        # S0/stereo1_l/disparity: image,
+        S0/stereo2_r:           image,
+        # S0/stereo2_r/hfflow:    image,
+        # S0/stereo2_r/disparity: image,
+        # S0/camd/hfflow:         image,
+        S0/camd:                image,
+        }
