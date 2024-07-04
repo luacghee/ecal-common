@@ -8,6 +8,12 @@ from capnp_subscriber import CapnpSubscriber
 capnp.add_import_hook(['../src/capnp'])
 
 import imu_capnp as eCALImu
+import image_capnp as eCALImage
+import odometry3d_capnp as eCALOdometry3d
+
+
+import time
+
 
 import queue
 from threading import Lock
@@ -74,8 +80,10 @@ class ImuSubscriber:
 
 
 class SyncedImageSubscriber:
-    def __init__(self, types, topics, 
-                 typeclasses=None, 
+    def __init__(self, 
+                #  types, 
+                 topics, 
+                #  typeclasses=None, 
                  enforce_sync=True):
 
         self.subscribers = {}
@@ -87,8 +95,8 @@ class SyncedImageSubscriber:
         self.callbacks = []
         
         self.latest = None
-        assert len(types) == len(topics)
-        assert typeclasses is None or len(typeclasses) == len(topics)
+        # assert len(types) == len(topics)
+        # assert typeclasses is None or len(typeclasses) == len(topics)
         self.size = len(topics)
 
         self.rolling = False
@@ -99,9 +107,11 @@ class SyncedImageSubscriber:
         self.lock = Lock()
 
         for i in range(len(topics)):
-            print(f"subscribing to {types[i]} topic {topics[i]}")
-            typeclass = typeclasses[i] if typeclasses is not None else None
-            sub = self.subscribers[topics[i]] = CapnpSubscriber(types[i], topics[i], typeclass)
+            print(f"subscribing to topic {topics[i]}")
+            # print(f"subscribing to {types[i]} topic {topics[i]}")
+            # typeclass = typeclasses[i] if typeclasses is not None else None
+            
+            sub = self.subscribers[topics[i]] = CapnpSubscriber("Image", topics[i], eCALImage.Image)
             sub.set_callback(self.callback)
 
             self.queues[topics[i]] = queue.Queue(10)
@@ -266,3 +276,305 @@ def disparity_to_cv_mat(imageMsg):
         return mat_float32, disp_vis
     else:
         raise RuntimeError(f"disparity type not supported: {imageMsg.encoding}")
+
+
+class VioSubscriber:
+
+    def __init__(self, vio_topic):
+        print(f"subscribing to viostate topic {vio_topic}")
+        sub = CapnpSubscriber("VioState", vio_topic)
+        sub.set_callback(self.callback)
+
+        self.rolling = False
+        self.m_queue = queue.Queue(2000)
+        self.latest = None
+        self.topic = vio_topic
+
+
+    def register_callback(self, cb):
+        self.vio_callbacks.append(cb)
+
+    def callback(self, topic_type, topic_name, msg, ts):
+        # need to remove the .decode() function within the Python API of ecal.core.subscriber ByteSubscriber
+
+        # print(topic_type, topic_name, msg, ts, sep="\n")
+        with eCALOdometry3d.Odometry3d.from_bytes(msg) as odometryMsg:
+
+            # for cb in self.vio_callbacks:
+            #     cb("capnp:Odometry3D", topic_name, odometryMsg, ts)
+
+            self.latest = odometryMsg
+
+
+            if self.rolling:
+                try:
+                    self.m_queue.put(odometryMsg, block=False)
+                except queue.Full:
+                    print("vio queue full")
+                    # print(self.m_queue.qsize())
+                    self.m_queue.get()
+                    self.m_queue.put(odometryMsg)
+
+    def pop_latest(self):
+        # with self.lock:
+        if self.latest == None:
+            return {}
+        else:
+            return self.latest
+
+    def pop_queue(self):
+        # imu is quite frequent, it is ok to be blocked
+
+        # if self.m_queue.qsize() > 10:
+        #     print(self.m_queue.qsize())
+        return self.m_queue.get()
+
+            # # read in data
+            # self.position_x = odometryMsg.pose.position.x
+            # self.position_y = odometryMsg.pose.position.y
+            # self.position_z = odometryMsg.pose.position.z
+
+            # self.orientation_x = odometryMsg.pose.orientation.x
+            # self.orientation_y = odometryMsg.pose.orientation.y
+            # self.orientation_z = odometryMsg.pose.orientation.z
+            # self.orientation_w = odometryMsg.pose.orientation.w
+
+            # self.ts = odometryMsg.header.stamp
+            # # text
+            # self.header = odometryMsg.header
+            # position_msg = f"position: \n {odometryMsg.pose.position.x:.4f}, {odometryMsg.pose.position.y:.4f}, {odometryMsg.pose.position.z:.4f}"
+            # orientation_msg = f"orientation: \n  {odometryMsg.pose.orientation.w:.4f}, {odometryMsg.pose.orientation.x:.4f}, {odometryMsg.pose.orientation.y:.4f}, {odometryMsg.pose.orientation.z:.4f}"
+            
+            # device_latency_msg = f"device latency = {odometryMsg.header.latencyDevice / 1e6 : .2f} ms"
+            
+            # vio_host_latency = time.monotonic() *1e9 - odometryMsg.header.stamp 
+            # host_latency_msg = f"host latency = {vio_host_latency / 1e6 :.2f} ms"
+            
+            # self.vio_msg = position_msg + "\n" + orientation_msg + "\n" + device_latency_msg + "\n" + host_latency_msg
+
+
+from typing import Dict, Tuple
+
+import cv2
+import numpy as np
+
+
+
+# Modified from https://github.com/matsuren/dscamera
+class DSCamera(object):
+    """DSCamera class.
+    V. Usenko, N. Demmel, and D. Cremers, "The Double Sphere Camera Model",
+    Proc. of the Int. Conference on 3D Vision (3DV), 2018.
+    """
+
+    def __init__(self, width, height, fx, fy, cx, cy, xi, alpha, fov):
+        # Fisheye camera parameters
+        self.h, self.w = height, width
+        self.fx = fx
+        self.fy = fy
+        self.cx = cx
+        self.cy = cy
+        self.xi = xi
+        self.alpha = alpha
+        self.fov = float(fov)
+        fov_rad = self.fov / 180 * np.pi
+        self.fov_cos = np.cos(fov_rad / 2)
+        self.intrinsic_keys = ["fx", "fy", "cx", "cy", "xi", "alpha"]
+
+        # Valid mask for fisheye image
+        self._valid_mask = None
+
+    @property
+    def img_size(self) -> Tuple[int, int]:
+        return self.h, self.w
+
+    @img_size.setter
+    def img_size(self, img_size: Tuple[int, int]):
+        self.h, self.w = map(int, img_size)
+
+    @property
+    def intrinsic(self) -> Dict[str, float]:
+        intrinsic = {key: self.__dict__[key] for key in self.intrinsic_keys}
+        return intrinsic
+
+    @intrinsic.setter
+    def intrinsic(self, intrinsic: Dict[str, float]):
+        for key in self.intrinsic_keys:
+            self.__dict__[key] = intrinsic[key]
+
+    @property
+    def valid_mask(self):
+        if self._valid_mask is None:
+            # Calculate and cache valid mask
+            x = np.arange(self.w)
+            y = np.arange(self.h)
+            x_grid, y_grid = np.meshgrid(x, y, indexing="xy")
+            _, valid_mask = self.cam2world([x_grid, y_grid])
+            self._valid_mask = valid_mask
+
+        return self._valid_mask
+
+    # def __repr__(self):
+    #     return (
+    #         f"[{self.__class__.__name__}]\n img_size:{self.img_size},fov:{self.fov},\n"
+    #         f" intrinsic:{json.dumps(self.intrinsic, indent=2)}"
+    #     )
+
+    def __hash__(self):
+        return hash(self.__repr__())
+
+    def __eq__(self, other):
+        return self.__repr__() == other.__repr__()
+
+    def cam2world(self, point2D):
+        """cam2world(point2D) projects a 2D point onto the unit sphere.
+        point3D coord: x:right direction, y:down direction, z:front direction
+        point2D coord: x:row direction, y:col direction (OpenCV image coordinate)
+        Parameters
+        ----------
+        point2D : numpy array or list([u,v])
+            array of point in image
+        Returns
+        -------
+        unproj_pts : numpy array
+            array of point on unit sphere
+        valid_mask : numpy array
+            array of valid mask
+        """
+        # Case: point2D = list([u, v]) or np.array()
+        if isinstance(point2D, (list, np.ndarray)):
+            u, v = point2D
+        # Case: point2D = list([Scalar, Scalar])
+        if not hasattr(u, "__len__"):
+            u, v = np.array([u]), np.array([v])
+
+        # Decide numpy or torch
+        if isinstance(u, np.ndarray):
+            xp = np
+        # else:
+        #     xp = torch
+
+        mx = (u - self.cx) / self.fx
+        my = (v - self.cy) / self.fy
+        r2 = mx * mx + my * my
+
+        # Check valid area
+        s = 1 - (2 * self.alpha - 1) * r2
+        valid_mask = s >= 0
+        s[~valid_mask] = 0.0
+        mz = (1 - self.alpha * self.alpha * r2) / (
+            self.alpha * xp.sqrt(s) + 1 - self.alpha
+        )
+
+        mz2 = mz * mz
+        k1 = mz * self.xi + xp.sqrt(mz2 + (1 - self.xi * self.xi) * r2)
+        k2 = mz2 + r2
+        k = k1 / k2
+
+        # Unprojected unit vectors
+        if xp == np:
+            unproj_pts = k[..., np.newaxis] * np.stack([mx, my, mz], axis=-1)
+        # else:
+        #     unproj_pts = k.unsqueeze(-1) * torch.stack([mx, my, mz], dim=-1)
+        unproj_pts[..., 2] -= self.xi
+
+        # Calculate fov
+        unprojected_fov_cos = unproj_pts[..., 2]  # unproj_pts @ z_axis
+        fov_mask = unprojected_fov_cos >= self.fov_cos
+        valid_mask *= fov_mask
+        return unproj_pts, valid_mask
+
+    def world2cam(self, point3D):
+        """world2cam(point3D) projects a 3D point on to the image.
+        point3D coord: x:right direction, y:down direction, z:front direction
+        point2D coord: x:row direction, y:col direction (OpenCV image coordinate).
+        Parameters
+        ----------
+        point3D : numpy array or list([x, y, z])
+            array of points in camera coordinate
+        Returns
+        -------
+        proj_pts : numpy array
+            array of points in image
+        valid_mask : numpy array
+            array of valid mask
+        """
+        x, y, z = point3D[..., 0], point3D[..., 1], point3D[..., 2]
+        # Decide numpy or torch
+        if isinstance(x, np.ndarray):
+            xp = np
+        # else:
+        #     xp = torch
+
+        # Calculate fov
+        point3D_fov_cos = point3D[..., 2]  # point3D @ z_axis
+        fov_mask = point3D_fov_cos >= self.fov_cos
+
+        # Calculate projection
+        x2 = x * x
+        y2 = y * y
+        z2 = z * z
+        d1 = xp.sqrt(x2 + y2 + z2)
+        zxi = self.xi * d1 + z
+        d2 = xp.sqrt(x2 + y2 + zxi * zxi)
+
+        div = self.alpha * d2 + (1 - self.alpha) * zxi
+        u = self.fx * x / div + self.cx
+        v = self.fy * y / div + self.cy
+
+        # Projected points on image plane
+        if xp == np:
+            proj_pts = np.stack([u, v], axis=-1)
+        # else:
+        #     proj_pts = torch.stack([u, v], dim=-1)
+
+        # Check valid area
+        if self.alpha <= 0.5:
+            w1 = self.alpha / (1 - self.alpha)
+        else:
+            w1 = (1 - self.alpha) / self.alpha
+        w2 = w1 + self.xi / xp.sqrt(2 * w1 * self.xi + self.xi * self.xi + 1)
+        valid_mask = z > -w2 * d1
+        valid_mask *= fov_mask
+
+        return proj_pts, valid_mask
+
+    def _warp_img(self, img, img_pts, valid_mask):
+        # Remap
+        img_pts = img_pts.astype(np.float32)
+        out = cv2.remap(
+            img, img_pts[..., 0], img_pts[..., 1], cv2.INTER_LINEAR
+        )
+        out[~valid_mask] = 0.0
+        return out
+
+    def to_perspective(self, img, img_size=(512, 512), f=0.25):
+        # Generate 3D points
+        h, w = img_size
+        z = f * min(img_size)
+        x = np.arange(w) - w / 2
+        y = np.arange(h) - h / 2
+        x_grid, y_grid = np.meshgrid(x, y, indexing="xy")
+        point3D = np.stack([x_grid, y_grid, np.full_like(x_grid, z)], axis=-1)
+
+        # Project on image plane
+        img_pts, valid_mask = self.world2cam(point3D)
+        out = self._warp_img(img, img_pts, valid_mask)
+        return out
+
+    def to_equirect(self, img, img_size=(256, 512)):
+        # Generate 3D points
+        h, w = img_size
+        phi = -np.pi + (np.arange(w) + 0.5) * 2 * np.pi / w
+        theta = -np.pi / 2 + (np.arange(h) + 0.5) * np.pi / h
+        phi_xy, theta_xy = np.meshgrid(phi, theta, indexing="xy")
+
+        x = np.sin(phi_xy) * np.cos(theta_xy)
+        y = np.sin(theta_xy)
+        z = np.cos(phi_xy) * np.cos(theta_xy)
+        point3D = np.stack([x, y, z], axis=-1)
+
+        # Project on image plane
+        img_pts, valid_mask = self.world2cam(point3D)
+        out = self._warp_img(img, img_pts, valid_mask)
+        return out
