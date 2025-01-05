@@ -1,6 +1,5 @@
 import capnp
 import numpy as np
-import cv2
 
 import ecal.core.core as ecal_core
 from capnp_subscriber import CapnpSubscriber
@@ -10,13 +9,21 @@ capnp.add_import_hook(['../src/capnp'])
 import imu_capnp as eCALImu
 import image_capnp as eCALImage
 import odometry3d_capnp as eCALOdometry3d
-
+# import viostate_capnp as eCALViostate
 
 import time
 
 
 import queue
 from threading import Lock
+
+
+
+from typing import Dict, Tuple
+
+import cv2 as cv
+import numpy as np
+
 
 class ImuSubscriber:
     def __init__(self, topic):
@@ -195,7 +202,7 @@ class SyncedImageSubscriber:
         # not protected for read
         return self.synced_queue.get()
 
-def image_resize(image, width = None, height = None, inter = cv2.INTER_AREA):
+def image_resize(image, width = None, height = None, inter = cv.INTER_AREA):
     # initialize the dimensions of the image to be resized and
     # grab the image size
     dim = None
@@ -221,7 +228,7 @@ def image_resize(image, width = None, height = None, inter = cv2.INTER_AREA):
         dim = (width, int(h * r))
 
     # resize the image
-    resized = cv2.resize(image, dim, interpolation = inter)
+    resized = cv.resize(image, dim, interpolation = inter)
 
     # return the resized image
     return resized
@@ -232,14 +239,14 @@ def image_msg_to_cv_mat(imageMsg):
         mat = np.frombuffer(imageMsg.data, dtype=np.uint8)
         mat = mat.reshape((imageMsg.height, imageMsg.width, 1))
 
-        mat_vis = cv2.cvtColor(mat, cv2.COLOR_GRAY2BGR)
+        mat_vis = cv.cvtColor(mat, cv.COLOR_GRAY2BGR)
 
         return mat, mat_vis
     elif (imageMsg.encoding == "yuv420"):
         mat = np.frombuffer(imageMsg.data, dtype=np.uint8)
         mat = mat.reshape((imageMsg.height * 3 // 2, imageMsg.width, 1))
 
-        mat = cv2.cvtColor(mat, cv2.COLOR_YUV2BGR_IYUV)
+        mat = cv.cvtColor(mat, cv.COLOR_YUV2BGR_IYUV)
 
         return mat, mat
     elif (imageMsg.encoding == "bgr8"):
@@ -248,7 +255,7 @@ def image_msg_to_cv_mat(imageMsg):
         return mat, mat
     elif (imageMsg.encoding == "jpeg"):
         mat_jpeg = np.frombuffer(imageMsg.data, dtype=np.uint8)
-        mat = cv2.imdecode(mat_jpeg, cv2.IMREAD_COLOR)
+        mat = cv.imdecode(mat_jpeg, cv.IMREAD_COLOR)
         return mat, mat
     else:
         raise RuntimeError("unknown encoding: " + imageMsg.encoding)
@@ -260,7 +267,7 @@ def disparity_to_cv_mat(imageMsg):
         mat = mat.reshape((imageMsg.height, imageMsg.width, 1))
 
         disp_vis = (mat * (255.0 / imageMsg.maxDisparity)).astype(np.uint8)
-        disp_vis = cv2.applyColorMap(disp_vis, cv2.COLORMAP_JET)
+        disp_vis = cv.applyColorMap(disp_vis, cv.COLORMAP_JET)
 
         return mat, disp_vis
     
@@ -271,7 +278,7 @@ def disparity_to_cv_mat(imageMsg):
         mat_float32 = mat_uint16.astype(np.float32) / 8.0
 
         disp_vis = (mat_float32 * (255.0 / imageMsg.maxDisparity)).astype(np.uint8)
-        disp_vis = cv2.applyColorMap(disp_vis, cv2.COLORMAP_JET)
+        disp_vis = cv.applyColorMap(disp_vis, cv.COLORMAP_JET)
 
         return mat_float32, disp_vis
     else:
@@ -282,7 +289,7 @@ class VioSubscriber:
 
     def __init__(self, vio_topic):
         print(f"subscribing to viostate topic {vio_topic}")
-        sub = CapnpSubscriber("VioState", vio_topic)
+        sub = CapnpSubscriber("Vio", vio_topic)
         sub.set_callback(self.callback)
 
         self.rolling = False
@@ -304,7 +311,6 @@ class VioSubscriber:
             #     cb("capnp:Odometry3D", topic_name, odometryMsg, ts)
 
             self.latest = odometryMsg
-
 
             if self.rolling:
                 try:
@@ -353,15 +359,88 @@ class VioSubscriber:
             # self.vio_msg = position_msg + "\n" + orientation_msg + "\n" + device_latency_msg + "\n" + host_latency_msg
 
 
-from typing import Dict, Tuple
 
-import cv2
-import numpy as np
+class VioStateSubscriber:
+
+    def __init__(self, viostate_topic):
+        print(f"subscribing to viostate topic {viostate_topic}")
+        sub = CapnpSubscriber("VioState", viostate_topic)
+        sub.set_callback(self.callback)
+
+        self.rolling = False
+        self.m_queue = queue.Queue(2000)
+        self.latest = None
+        self.topic = viostate_topic
+
+
+    def register_callback(self, cb):
+        self.viviostate_callbacks.append(cb)
+
+    def callback(self, topic_type, topic_name, msg, ts):
+        # need to remove the .decode() function within the Python API of ecal.core.subscriber ByteSubscriber
+
+        # print(topic_type, topic_name, ts, sep="\n")
+        with eCALOdometry3d.VioState.from_bytes(msg) as viostateMsg:
+            # print(viostateMsg.biasAccel, viostateMsg.biasGyro)
+    #         print(viostateMsg.states)
+    # #         # for cb in self.vio_callbacks:
+    # #         #     cb("capnp:Odometry3D", topic_name, odometryMsg, ts)
+
+            self.latest = viostateMsg
+
+            if self.rolling:
+                try:
+                    self.m_queue.put(viostateMsg, block=False)
+                except queue.Full:
+                    print("vio queue full")
+                    # print(self.m_queue.qsize())
+                    self.m_queue.get()
+                    self.m_queue.put(viostateMsg)
+
+    def pop_latest(self):
+        # with self.lock:
+        if self.latest == None:
+            return {}
+        else:
+            return self.latest
+
+    def pop_queue(self):
+        # imu is quite frequent, it is ok to be blocked
+
+        # if self.m_queue.qsize() > 10:
+        #     print(self.m_queue.qsize())
+        return self.m_queue.get()
+
+            # # read in data
+            # self.position_x = odometryMsg.pose.position.x
+            # self.position_y = odometryMsg.pose.position.y
+            # self.position_z = odometryMsg.pose.position.z
+
+            # self.orientation_x = odometryMsg.pose.orientation.x
+            # self.orientation_y = odometryMsg.pose.orientation.y
+            # self.orientation_z = odometryMsg.pose.orientation.z
+            # self.orientation_w = odometryMsg.pose.orientation.w
+
+            # self.ts = odometryMsg.header.stamp
+            # # text
+            # self.header = odometryMsg.header
+            # position_msg = f"position: \n {odometryMsg.pose.position.x:.4f}, {odometryMsg.pose.position.y:.4f}, {odometryMsg.pose.position.z:.4f}"
+            # orientation_msg = f"orientation: \n  {odometryMsg.pose.orientation.w:.4f}, {odometryMsg.pose.orientation.x:.4f}, {odometryMsg.pose.orientation.y:.4f}, {odometryMsg.pose.orientation.z:.4f}"
+            
+            # device_latency_msg = f"device latency = {odometryMsg.header.latencyDevice / 1e6 : .2f} ms"
+            
+            # vio_host_latency = time.monotonic() *1e9 - odometryMsg.header.stamp 
+            # host_latency_msg = f"host latency = {vio_host_latency / 1e6 :.2f} ms"
+            
+            # self.vio_msg = position_msg + "\n" + orientation_msg + "\n" + device_latency_msg + "\n" + host_latency_msg
+
+
+
 
 
 
 # Modified from https://github.com/matsuren/dscamera
-class DSCamera(object):
+class FisheyeDoubleSphere(object):
     """DSCamera class.
     V. Usenko, N. Demmel, and D. Cremers, "The Double Sphere Camera Model",
     Proc. of the Int. Conference on 3D Vision (3DV), 2018.
@@ -542,13 +621,14 @@ class DSCamera(object):
     def _warp_img(self, img, img_pts, valid_mask):
         # Remap
         img_pts = img_pts.astype(np.float32)
-        out = cv2.remap(
-            img, img_pts[..., 0], img_pts[..., 1], cv2.INTER_LINEAR
+        out = cv.remap(
+            img, img_pts[..., 0], img_pts[..., 1], cv.INTER_LINEAR
         )
         out[~valid_mask] = 0.0
         return out
 
-    def to_perspective(self, img, img_size=(512, 512), f=0.25):
+    # def to_perspective(self, img, img_size=(600, 960), f=0.25):
+    def to_perspective(self, img, img_size=(400, 640), f=0.25):
         # Generate 3D points
         h, w = img_size
         z = f * min(img_size)
@@ -560,6 +640,13 @@ class DSCamera(object):
         # Project on image plane
         img_pts, valid_mask = self.world2cam(point3D)
         out = self._warp_img(img, img_pts, valid_mask)
+
+        # start_y = 100  # Top-left y coordinate
+        # start_x = 160   # Top-left x coordinate
+        # width = 640     # Width of the cropped region
+        # height = 400    # Height of the cropped region
+
+        # out = out[start_y:start_y+height, start_x:start_x+width]
         return out
 
     def to_equirect(self, img, img_size=(256, 512)):
@@ -578,3 +665,43 @@ class DSCamera(object):
         img_pts, valid_mask = self.world2cam(point3D)
         out = self._warp_img(img, img_pts, valid_mask)
         return out
+
+
+class FisheyeKB4(object):
+    """DSCamera class.
+    V. Usenko, N. Demmel, and D. Cremers, "The Double Sphere Camera Model",
+    Proc. of the Int. Conference on 3D Vision (3DV), 2018.
+    """
+
+    def __init__(self, width, height, fx, fy, cx, cy, k1, k2, k3, k4):
+        # Fisheye camera parameters
+        self.h = height
+        self.w = width
+        self.fx = fx
+        self.fy = fy
+        self.cx = cx
+        self.cy = cy
+        self.k1 = k1
+        self.k2 = k2
+        self.k3 = k3
+        self.k4 = k4
+        self.instrincs_mat = np.array([[fx, 0.0, cx], 
+                                        [0.0, fy, cy], 
+                                        [0.0, 0.0, 1.0]])
+        
+        self.distortion_coeff = np.array([[k1], [k2], [k3], [k4]])
+
+    # Define the projection function for Kannala-Brandt model
+    def to_perspective(self, img):
+
+        map1, map2 = cv.fisheye.initUndistortRectifyMap(self.instrincs_mat, 
+                                                        self.distortion_coeff, 
+                                                        np.eye(3), 
+                                                        self.instrincs_mat, 
+                                                        (self.w, self.h), 
+                                                        cv.CV_16SC2)
+
+        perspective_img = cv.remap(img, map1, map2, interpolation=cv.INTER_LANCZOS4, borderMode=cv.BORDER_CONSTANT)
+        perspective_img = cv.resize(perspective_img, (640, 400), interpolation = cv.INTER_LANCZOS4)
+
+        return perspective_img

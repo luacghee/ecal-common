@@ -2,7 +2,7 @@
 dp180_master: {
         S1/imu:                 imu,
         # S1/imu_list:            imulist,
-        # S1/vio_state:           viostate,
+        S1/vio_state:           viostate,
         # S1/vio_odom_ned:        odometry3d,
         S1/vio_odom:            odometry3d,
         S1/stereo1_l:           image,
